@@ -1,0 +1,166 @@
+name: Check Node.js Version Updates
+
+on:
+  schedule:
+    # 06:00 JST = 21:00 UTC (previous day)
+    - cron: '0 21 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check-updates:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Check .node-version updates
+        id: check
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ ! -f .node-version ]]; then
+            echo '.node-version not found.' >&2
+            exit 1
+          fi
+
+          current_raw="$(tr -d '[:space:]' < .node-version)"
+          current="${current_raw#v}"
+
+          if [[ ! "$current" =~ ^([0-9]+)\.([0-9]+)(\.([0-9]+))?$ ]]; then
+            echo "Unsupported .node-version format: $current_raw" >&2
+            exit 1
+          fi
+
+          current_major="${BASH_REMATCH[1]}"
+          current_minor="${BASH_REMATCH[2]}"
+          current_patch="${BASH_REMATCH[4]:-0}"
+
+          releases_json="$(curl -fsSL https://nodejs.org/dist/index.json)"
+
+          # Get latest release for the same major version
+          latest_same_major="$(echo "$releases_json" | jq -r \
+            --argjson major "$current_major" \
+            '[.[] | select((.version | ltrimstr("v") | split(".")[0] | tonumber) == $major)]
+             | sort_by(.date) | last | .version // empty' || true)"
+
+          if [[ -z "$latest_same_major" ]]; then
+            latest_same_major="v${current_major}.${current_minor}.${current_patch}"
+          fi
+
+          latest_same_major_num="${latest_same_major#v}"
+          latest_minor="$(echo "$latest_same_major_num" | cut -d. -f2)"
+          latest_patch="$(echo "$latest_same_major_num" | cut -d. -f3)"
+
+          minor_update=false
+          if (( latest_minor > current_minor )); then
+            minor_update=true
+          elif (( latest_minor == current_minor && latest_patch > current_patch )); then
+            minor_update=true
+          fi
+
+          # Find the next LTS major (closest greater major), then pick its latest patch.
+          next_lts_major_release="$(echo "$releases_json" | jq -r \
+            --argjson currentMajor "$current_major" \
+            '[.[]
+              | select(.lts != false)
+              | . + {major: (.version | ltrimstr("v") | split(".")[0] | tonumber)}
+              | select(.major > $currentMajor)
+             ]
+             | (map(.major) | min) as $nextMajor
+             | map(select(.major == $nextMajor))
+             | sort_by(.date)
+             | last
+             | .version // empty' || true)"
+
+          major_update=false
+          if [[ -n "$next_lts_major_release" ]]; then
+            major_update=true
+          fi
+
+          echo "current=v${current_major}.${current_minor}.${current_patch}" >> "$GITHUB_OUTPUT"
+          echo "minor_update=$minor_update" >> "$GITHUB_OUTPUT"
+          echo "major_update=$major_update" >> "$GITHUB_OUTPUT"
+          echo "latest_minor_target=$latest_same_major" >> "$GITHUB_OUTPUT"
+          echo "latest_major_lts_target=${next_lts_major_release:-}" >> "$GITHUB_OUTPUT"
+
+      - name: Create issue for minor update
+        if: steps.check.outputs.minor_update == 'true'
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const current = '${{ steps.check.outputs.current }}';
+            const target = '${{ steps.check.outputs.latest_minor_target }}';
+            const title = `[Node.js Minor Update] ${current} -> ${target}`;
+
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
+              owner,
+              repo,
+              state: 'open',
+              per_page: 100,
+            });
+
+            if (issues.some((issue) => issue.title === title)) {
+              core.info(`Issue already exists: ${title}`);
+              return;
+            }
+
+            await github.rest.issues.create({
+              owner,
+              repo,
+              title,
+              body: [
+                '`.node-version` のマイナー/パッチ更新先が見つかりました。',
+                '',
+                `- Current: ${current}`,
+                `- Latest in same major: ${target}`,
+                '',
+                '必要に応じて `.node-version` の更新を検討してください。',
+              ].join('\n'),
+              labels: ['dependencies', 'nodejs', 'minor-update'],
+            });
+
+      - name: Create issue for major LTS update
+        if: steps.check.outputs.major_update == 'true'
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const current = '${{ steps.check.outputs.current }}';
+            const target = '${{ steps.check.outputs.latest_major_lts_target }}';
+            const title = `[Node.js Major LTS Update] ${current} -> ${target}`;
+
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
+              owner,
+              repo,
+              state: 'open',
+              per_page: 100,
+            });
+
+            if (issues.some((issue) => issue.title === title)) {
+              core.info(`Issue already exists: ${title}`);
+              return;
+            }
+
+            await github.rest.issues.create({
+              owner,
+              repo,
+              title,
+              body: [
+                '`.node-version` のメジャー (LTS) 更新先が見つかりました。',
+                '',
+                `- Current: ${current}`,
+                `- Latest newer LTS major: ${target}`,
+                '',
+                '互換性を確認した上で `.node-version` のメジャーアップデートを検討してください。',
+              ].join('\n'),
+              labels: ['dependencies', 'nodejs', 'major-update'],
+            });
