@@ -64,20 +64,22 @@ jobs:
             minor_update=true
           fi
 
-          # Find latest LTS major that is newer than current major
-          latest_lts_major_release="$(echo "$releases_json" | jq -r \
+          # Find the next LTS major (closest greater major), then pick its latest patch.
+          next_lts_major_release="$(echo "$releases_json" | jq -r \
             --argjson currentMajor "$current_major" \
             '[.[]
               | select(.lts != false)
               | . + {major: (.version | ltrimstr("v") | split(".")[0] | tonumber)}
               | select(.major > $currentMajor)
              ]
-             | sort_by(.major, .date)
+             | (map(.major) | min) as $nextMajor
+             | map(select(.major == $nextMajor))
+             | sort_by(.date)
              | last
              | .version // empty' || true)"
 
           major_update=false
-          if [[ -n "$latest_lts_major_release" ]]; then
+          if [[ -n "$next_lts_major_release" ]]; then
             major_update=true
           fi
 
@@ -85,7 +87,7 @@ jobs:
           echo "minor_update=$minor_update" >> "$GITHUB_OUTPUT"
           echo "major_update=$major_update" >> "$GITHUB_OUTPUT"
           echo "latest_minor_target=$latest_same_major" >> "$GITHUB_OUTPUT"
-          echo "latest_major_lts_target=${latest_lts_major_release:-}" >> "$GITHUB_OUTPUT"
+          echo "latest_major_lts_target=${next_lts_major_release:-}" >> "$GITHUB_OUTPUT"
 
       - name: Create issue for minor update
         if: steps.check.outputs.minor_update == 'true'
