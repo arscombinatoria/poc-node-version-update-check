@@ -4,6 +4,14 @@ on:
   schedule:
     # 06:00 JST = 21:00 UTC (previous day)
     - cron: '0 21 * * *'
+  push:
+    paths:
+      - '.github/workflows/check-node-version-updates.yml'
+      - '.node-version'
+  pull_request:
+    paths:
+      - '.github/workflows/check-node-version-updates.yml'
+      - '.node-version'
   workflow_dispatch:
 
 permissions:
